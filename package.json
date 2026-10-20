@@ -1,9 +1,9 @@
 {
   "name": "@altamkp/dsh-sync",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Sync DeepSeek Harness plugins and settings across devices through a GitHub repository you own",
+  "description": "Sync DeepSeek Harness plugins and settings across devices through a GitHub Gist or a GitHub repository you own",
   "repository": { "type": "git", "url": "git+https://github.com/altamkp/dsh-sync.git" },
   "license": "MIT",
   "exports": {

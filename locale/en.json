@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "DSH Sync",
-    "description": "Sync DeepSeek Harness plugins and settings across devices through a GitHub repository you own. Push publishes this device's bundles, plugin enable states, and plugin settings; pull applies a remote snapshot on this device. Secret-shaped values are never synced. The sidebar's Sync page shows the state and runs the same operations."
+    "description": "Sync DeepSeek Harness plugins and settings across devices through a GitHub Gist (the default) or a GitHub repository you own. Push publishes this device's bundles, plugin enable states, and plugin settings; pull applies a remote snapshot on this device. Secret-shaped values are never synced. The sidebar's Sync page shows the state and runs the same operations."
   }
 }

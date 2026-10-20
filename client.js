@@ -3,8 +3,10 @@
  *
  * Contributes one sidebar row and one center-column page to the Harness Web
  * GUI, so the same operations the `dsh_sync` tool performs are reachable by
- * hand: watch the repository state, take a snapshot, publish it, pull the
- * remote manifest, and see what differs.
+ * hand: watch the sync state, take a snapshot, publish it, pull the remote
+ * manifest, and see what differs. The manifest lives either in a GitHub Gist
+ * or in a branch of a GitHub repository; the host says which, and the page
+ * follows it.
  *
  * The page is a thin view over the Host half: every action travels to the
  * package's own HTTP routes, which call exactly the functions the tool calls.
@@ -37,11 +39,16 @@ window.__ModuleLoader__.load({
       'nav.label': '同步',
       'page.title': '同步',
       'page.subtitle': '在多台设备之间同步 DeepSeek Harness 的插件与设置。',
-      'card.repository': '仓库',
+      'card.settings': '同步设置',
       'card.status': '状态',
       'card.actions': '操作',
       'card.result': '结果',
+      'field.target': '同步目标',
+      'target.gist': 'GitHub Gist',
+      'target.repo': 'GitHub 仓库',
       'field.repository': 'GitHub 仓库',
+      'field.gist': 'Gist',
+      'field.gistId': 'Gist ID 或链接',
       'field.branch': '分支',
       'field.tokenEnv': '令牌环境变量',
       'field.authMode': '认证方式',
@@ -49,21 +56,27 @@ window.__ModuleLoader__.load({
       'auth.mode.pat': '个人访问令牌 (PAT)',
       'auth.hint.gh': '使用 gh auth login 登录的账号凭据，无需自行配置令牌。',
       'auth.hint.pat': '令牌从环境变量读取，不会写入配置，也不会离开这台设备。',
-      'field.checkout': '本地缓存',
+      'field.cache': '本地缓存',
       'field.auth': '认证',
       'field.drift': '与快照的差异',
       'field.remote': '远端仓库',
+      'field.remoteGist': '远端 Gist',
       'field.device': '本机',
       'notConfigured': '尚未指定仓库',
+      'notConfiguredGist': '尚未指定 Gist',
       'notConfiguredHint': '填写一个 GitHub 仓库地址并保存，即可开始同步。',
+      'notConfiguredHintGist': '留空即可：首次推送时会自动创建一个私密 Gist。',
       'placeholder.repository': 'https://github.com/<owner>/<repo>',
+      'placeholder.gistId': 'https://gist.github.com/<user>/<id>',
       'btn.save': '保存',
       'btn.cancel': '取消',
       'btn.edit': '修改仓库',
       'btn.refresh': '刷新状态',
       'btn.snapshot': '生成快照',
       'btn.push': '推送到 GitHub',
+      'btn.pushGist': '推送到 Gist',
       'btn.pull': '从 GitHub 拉取',
+      'btn.pullGist': '从 Gist 拉取',
       'btn.diff': '查看差异',
       'busy': '处理中…',
       'error.title': '操作失败',
@@ -72,7 +85,10 @@ window.__ModuleLoader__.load({
       'result.snapshot.committed': '已在本地提交快照。',
       'result.snapshot.unchanged': '本地状态与已提交的快照一致，无需提交。',
       'result.snapshot.localOnly': '快照只提交在本地，调用「推送到 GitHub」即可发布。',
+      'result.snapshot.localOnlyGist': '快照只保存在本地缓存，调用「推送到 Gist」即可发布。',
       'result.push.pushed': '已推送到 GitHub。',
+      'result.push.gistCreated': '已创建新的 Gist。',
+      'result.push.gistUnchanged': 'Gist 中已是同一份快照，无需更新。',
       'result.push.counts': '插件包 {bundles} 个 · 插件 {plugins} 个 · 设置 {configs} 项',
       'result.pull.summary': '已应用：安装 {bundlesInstalled} · 开关 {bundleToggles} · 插件 {pluginToggles} · 设置 {configsWritten} · 跳过 {skipped} · 失败 {failures}',
       'result.pull.steps': '本次改动',
@@ -80,9 +96,6 @@ window.__ModuleLoader__.load({
       'result.pull.restart': '部分改动需要重启 DeepSeek Harness 后生效。',
       'result.diff.equal': '本地状态与已提交的快照完全一致。',
       'result.diff.title': '与已提交快照的差异',
-      'result.diff.added': '新增',
-      'result.diff.removed': '移除',
-      'result.diff.changed': '变化',
       'result.configure.saved': '已保存仓库设置。',
       'status.tokenPresent': '已找到令牌',
       'status.tokenMissing': '未设置令牌',
@@ -100,17 +113,20 @@ window.__ModuleLoader__.load({
       'status.sameAsSnapshot': '与上次快照一致',
       'status.drift': '{bundles} 个插件包、{plugins} 个插件、{configs} 项设置与快照不同',
       'status.noSnapshot': '还没有提交过快照',
-      'status.checkoutMissing': '尚未创建本地缓存，首次同步时会自动建立',
+      'status.cacheMissing': '尚未创建本地缓存，首次同步时会自动建立',
       'remote.reachable': '远端可访问',
       'remote.unreachable': '远端不可访问',
       'remote.hasBranch': '远端包含该分支',
       'remote.noBranch': '远端还没有该分支',
+      'remote.hasFile': 'Gist 中包含清单',
+      'remote.noFile': 'Gist 中还没有清单',
       'remote.checking': '正在检查远端…',
       'remote.reason.denied': '认证或权限不足',
       'remote.reason.unreachable': '网络不可达',
       'remote.reason.missingGit': '缺少 git 命令行工具',
       'remote.reason.missingGh': '未安装 GitHub CLI',
       'remote.reason.notAuthenticated': 'GitHub CLI 未登录',
+      'remote.reason.notFound': '找不到该 Gist',
       'remote.reason.noToken': '未设置令牌',
       'remote.reason.unknown': '未知原因',
       'actions.blocked.loading': '正在读取同步状态，操作按钮暂不可用。',
@@ -121,10 +137,13 @@ window.__ModuleLoader__.load({
       'actions.blocked.missingGit': '本机没有可用的 git 命令行工具，操作按钮暂不可用。',
       'actions.blocked.missingGh': '本机没有安装 GitHub CLI (gh)，操作按钮暂不可用。',
       'actions.blocked.notAuthenticated': 'GitHub CLI 尚未登录（请运行 gh auth login），操作按钮暂不可用。',
+      'actions.blocked.notFound': '找不到该 Gist（ID 不对，或当前凭据无权访问），操作按钮暂不可用。',
       'actions.blocked.noToken': '尚未设置令牌环境变量，操作按钮暂不可用。',
       'actions.blocked.readOnly': '当前凭据对该仓库只有只读权限，无法推送。',
+      'actions.blocked.readOnlyGist': '当前凭据对该 Gist 只有只读权限，无法发布。',
       'actions.blocked.unknown': '无法访问远端仓库，操作按钮暂不可用。',
       'note.secret': '密钥类设置不会被导出，也不会离开这台设备。',
+      'note.gistSecret': 'Gist 默认是私密的（secret gist），只有你可见。',
       'note.tool': '同样的操作也可以交给 Agent：dsh_sync 工具。',
       'raw': '原始结果',
       'unknown': '未知',
@@ -135,11 +154,16 @@ window.__ModuleLoader__.load({
       'nav.label': 'Sync',
       'page.title': 'Sync',
       'page.subtitle': 'Sync DeepSeek Harness plugins and settings between devices.',
-      'card.repository': 'Repository',
+      'card.settings': 'Sync settings',
       'card.status': 'Status',
       'card.actions': 'Actions',
       'card.result': 'Result',
+      'field.target': 'Sync target',
+      'target.gist': 'GitHub Gist',
+      'target.repo': 'GitHub repository',
       'field.repository': 'GitHub repository',
+      'field.gist': 'Gist',
+      'field.gistId': 'Gist ID or URL',
       'field.branch': 'Branch',
       'field.tokenEnv': 'Token environment variable',
       'field.authMode': 'Authentication method',
@@ -147,21 +171,27 @@ window.__ModuleLoader__.load({
       'auth.mode.pat': 'Personal access token (PAT)',
       'auth.hint.gh': "Uses the credential of the account the GitHub CLI is logged in as; there is no token to configure.",
       'auth.hint.pat': 'The token is read from an environment variable — it is never written to the configuration and never leaves this device.',
-      'field.checkout': 'Local checkout',
+      'field.cache': 'Local cache',
       'field.auth': 'Authentication',
       'field.drift': 'Difference from snapshot',
       'field.remote': 'Remote repository',
+      'field.remoteGist': 'Remote gist',
       'field.device': 'Device',
       'notConfigured': 'No repository assigned yet',
+      'notConfiguredGist': 'No gist assigned yet',
       'notConfiguredHint': 'Enter a GitHub repository and save to start syncing.',
+      'notConfiguredHintGist': 'Leave it empty and the first push creates a secret gist for you.',
       'placeholder.repository': 'https://github.com/<owner>/<repo>',
+      'placeholder.gistId': 'https://gist.github.com/<user>/<id>',
       'btn.save': 'Save',
       'btn.cancel': 'Cancel',
       'btn.edit': 'Edit repository',
       'btn.refresh': 'Refresh status',
       'btn.snapshot': 'Snapshot',
       'btn.push': 'Push to GitHub',
+      'btn.pushGist': 'Push to Gist',
       'btn.pull': 'Pull from GitHub',
+      'btn.pullGist': 'Pull from Gist',
       'btn.diff': 'Show differences',
       'busy': 'Working…',
       'error.title': 'Action failed',
@@ -170,7 +200,10 @@ window.__ModuleLoader__.load({
       'result.snapshot.committed': 'Snapshot committed locally.',
       'result.snapshot.unchanged': 'Local state already matches the committed snapshot; nothing to commit.',
       'result.snapshot.localOnly': 'The snapshot is committed locally only; use Push to publish it.',
+      'result.snapshot.localOnlyGist': 'The snapshot is kept in the local cache only; use Push to Gist to publish it.',
       'result.push.pushed': 'Pushed to GitHub.',
+      'result.push.gistCreated': 'A new gist was created.',
+      'result.push.gistUnchanged': 'The gist already holds this snapshot; nothing to update.',
       'result.push.counts': '{bundles} bundles · {plugins} plugins · {configs} settings',
       'result.pull.summary': 'Applied: {bundlesInstalled} installed · {bundleToggles} toggles · {pluginToggles} plugins · {configsWritten} settings · {skipped} skipped · {failures} failed',
       'result.pull.steps': 'Changes',
@@ -178,9 +211,6 @@ window.__ModuleLoader__.load({
       'result.pull.restart': 'Some changes need a DeepSeek Harness restart to take effect.',
       'result.diff.equal': 'Local state matches the committed snapshot exactly.',
       'result.diff.title': 'Difference from the committed snapshot',
-      'result.diff.added': 'Added',
-      'result.diff.removed': 'Removed',
-      'result.diff.changed': 'Changed',
       'result.configure.saved': 'Repository settings saved.',
       'status.tokenPresent': 'Token found',
       'status.tokenMissing': 'No token set',
@@ -198,17 +228,20 @@ window.__ModuleLoader__.load({
       'status.sameAsSnapshot': 'Matches the last snapshot',
       'status.drift': '{bundles} bundles, {plugins} plugins and {configs} settings differ from the snapshot',
       'status.noSnapshot': 'No snapshot committed yet',
-      'status.checkoutMissing': 'The local checkout is created on the first sync',
+      'status.cacheMissing': 'The local cache is created on the first sync',
       'remote.reachable': 'Remote reachable',
       'remote.unreachable': 'Remote unreachable',
       'remote.hasBranch': 'The remote has this branch',
       'remote.noBranch': 'The remote has no such branch yet',
+      'remote.hasFile': 'The gist holds the manifest',
+      'remote.noFile': 'The gist has no manifest yet',
       'remote.checking': 'Checking the remote…',
       'remote.reason.denied': 'authentication or permission',
       'remote.reason.unreachable': 'network unreachable',
       'remote.reason.missingGit': 'git command line tool missing',
       'remote.reason.missingGh': 'the GitHub CLI is not installed',
       'remote.reason.notAuthenticated': 'the GitHub CLI is not logged in',
+      'remote.reason.notFound': 'the gist was not found',
       'remote.reason.noToken': 'no token set',
       'remote.reason.unknown': 'unknown reason',
       'actions.blocked.loading': 'Reading the sync state — the action buttons are unavailable.',
@@ -219,10 +252,13 @@ window.__ModuleLoader__.load({
       'actions.blocked.missingGit': 'No git command line tool is available on this device — the action buttons are unavailable.',
       'actions.blocked.missingGh': 'The GitHub CLI (gh) is not installed on this device — the action buttons are unavailable.',
       'actions.blocked.notAuthenticated': 'The GitHub CLI is not logged in (run `gh auth login`) — the action buttons are unavailable.',
+      'actions.blocked.notFound': 'The gist was not found (wrong ID, or the credential may not access it) — the action buttons are unavailable.',
       'actions.blocked.noToken': 'No token environment variable is set — the action buttons are unavailable.',
       'actions.blocked.readOnly': 'The current credential has read-only access to this repository — it cannot push.',
+      'actions.blocked.readOnlyGist': 'The current credential has read-only access to this gist — it cannot publish.',
       'actions.blocked.unknown': 'The remote repository cannot be accessed — the action buttons are unavailable.',
       'note.secret': 'Secret-shaped settings are never exported and never leave this device.',
+      'note.gistSecret': 'The gist is secret by default — only you can see it.',
       'note.tool': 'The same operations are available to an Agent through the dsh_sync tool.',
       'raw': 'Raw result',
       'unknown': 'unknown',
@@ -397,12 +433,22 @@ window.__ModuleLoader__.load({
         );
       }
       const result = outcome.result ?? {};
+      // The host names the target it acted on, so the copy follows the run
+      // rather than the target the form happens to hold.
+      const gistRun = result.target === 'gist';
       const lines = [];
       if (outcome.action === 'snapshot') {
         lines.push(result.committed === true ? t('result.snapshot.committed') : t('result.snapshot.unchanged'));
-        if (result.committed === true && result.pushed !== true) lines.push(t('result.snapshot.localOnly'));
+        if (result.committed === true && result.pushed !== true) {
+          lines.push(gistRun ? t('result.snapshot.localOnlyGist') : t('result.snapshot.localOnly'));
+        }
       } else if (outcome.action === 'push') {
-        lines.push(result.pushed === true ? t('result.push.pushed') : t('result.snapshot.localOnly'));
+        if (result.pushed === true) {
+          lines.push(t('result.push.pushed'));
+          if (gistRun && result.created === true) lines.push(t('result.push.gistCreated'));
+        } else {
+          lines.push(gistRun ? t('result.push.gistUnchanged') : t('result.snapshot.localOnly'));
+        }
         if (result.summary !== undefined) {
           lines.push(t('result.push.counts', {
             bundles: result.summary.bundles ?? 0,
@@ -464,6 +510,7 @@ window.__ModuleLoader__.load({
       'missing-git': 'actions.blocked.missingGit',
       'missing-gh': 'actions.blocked.missingGh',
       'not-authenticated': 'actions.blocked.notAuthenticated',
+      'not-found': 'actions.blocked.notFound',
       'no-token': 'actions.blocked.noToken',
       unknown: 'actions.blocked.unknown',
     };
@@ -475,6 +522,7 @@ window.__ModuleLoader__.load({
       'missing-git': 'remote.reason.missingGit',
       'missing-gh': 'remote.reason.missingGh',
       'not-authenticated': 'remote.reason.notAuthenticated',
+      'not-found': 'remote.reason.notFound',
       'no-token': 'remote.reason.noToken',
       unknown: 'remote.reason.unknown',
     };
@@ -514,8 +562,16 @@ window.__ModuleLoader__.load({
       // The status is a disclosure inside the repository card. It starts open,
       // so the page shows the same state it showed before the reorganisation.
       const [statusOpen, setStatusOpen] = React.useState(true);
-      const [form, setForm] = React.useState({ repoUrl: '', branch: '', githubTokenEnv: '', authMode: 'gh' });
+      // The form holds the pending change: the target the user picked and the
+      // values that belong to it. The other target's values are kept, so
+      // switching back and forth never wipes them.
+      const [form, setForm] = React.useState({ target: 'gist', gistId: '', repoUrl: '', branch: '', githubTokenEnv: '', authMode: 'gh' });
       const [formTouched, setFormTouched] = React.useState(false);
+      // Whether the user picked a target the host does not use yet.
+      const targetTouched = React.useRef(false);
+      // The target the host last reported, so a switch on the host's side can
+      // be told apart from the user's own pending choice.
+      const reportedTarget = React.useRef(undefined);
       const [probing, setProbing] = React.useState(false);
       const [, setRevision] = React.useState(0);
 
@@ -527,23 +583,54 @@ window.__ModuleLoader__.load({
         return unsubscribe;
       }, []);
 
-      /** Fill the edit form from the state, unless the user already typed. */
+      /**
+       * Fill the edit form from the state, unless the user already typed.
+       *
+       * The target follows the host unless the user picked one; the values
+       * follow the host unless they were typed. When the host switches target
+       * on its own — after a configure, say — the form follows it completely,
+       * because the other target's values no longer describe anything.
+       */
       const applyFormDefaults = (next) => {
-        if (formTouched) return;
-        setForm((current) => ({
-          repoUrl: current.repoUrl || next.repository || '',
-          branch: current.branch || next.branch || '',
-          githubTokenEnv: current.githubTokenEnv || (next.authentication && next.authentication.tokenEnv) || '',
-          authMode: current.authMode || (next.authentication && next.authentication.mode) || 'gh',
-        }));
+        const nextTarget = next.target === 'repo' ? 'repo' : 'gist';
+        const previousTarget = reportedTarget.current;
+        reportedTarget.current = nextTarget;
+        const hostSwitched = previousTarget !== undefined && previousTarget !== nextTarget;
+        if (hostSwitched) targetTouched.current = false;
+        setForm((current) => {
+          const target = targetTouched.current ? current.target : nextTarget;
+          if (hostSwitched) {
+            return {
+              ...current,
+              target,
+              // An empty value never replaces a filled one: the host may not
+              // name the gist it was just given.
+              gistId: next.gist?.id !== undefined && next.gist.id !== '' ? next.gist.id : current.gistId,
+              repoUrl: next.repository !== undefined && next.repository !== '' ? next.repository : current.repoUrl,
+              branch: next.branch !== undefined && next.branch !== '' ? next.branch : current.branch,
+            };
+          }
+          if (formTouched) return { ...current, target };
+          return {
+            ...current,
+            target,
+            gistId: current.gistId || next.gist?.id || '',
+            repoUrl: current.repoUrl || next.repository || '',
+            branch: current.branch || next.branch || '',
+            githubTokenEnv: current.githubTokenEnv || (next.authentication && next.authentication.tokenEnv) || '',
+            authMode: current.authMode || (next.authentication && next.authentication.mode) || 'gh',
+          };
+        });
       };
 
       /**
-       * Read the state, then — when a repository is assigned — ask the host
-       * whether that repository can actually be reached.
+       * Read the state, then ask the host whether the remote can actually be
+       * reached.
        *
        * The local read comes first so the page is usable at once; the probe
-       * decides whether the repository actions may run at all.
+       * decides whether the repository actions may run at all. A gist target
+       * is probed even without a gist assigned — the first push creates one,
+       * but the credential still has to be usable.
        */
       const refresh = async () => {
         let local;
@@ -556,7 +643,8 @@ window.__ModuleLoader__.load({
         setStatus(local);
         setStatusError(null);
         applyFormDefaults(local);
-        if (local.configured !== true) {
+        const target = local.target === 'repo' ? 'repo' : 'gist';
+        if (target === 'repo' && local.configured !== true) {
           setProbing(false);
           return;
         }
@@ -601,13 +689,24 @@ window.__ModuleLoader__.load({
       const save = async () => {
         setBusy('configure');
         setOutcome(null);
-        try {
-          const payload = await runAction('configure', {
+        // Only the fields of the chosen target travel, so switching the target
+        // never writes the other one's value away.
+        const body = form.target === 'repo'
+          ? {
+            target: 'repo',
             repoUrl: form.repoUrl.trim(),
             branch: form.branch.trim(),
             authMode: form.authMode,
             githubTokenEnv: form.githubTokenEnv.trim(),
-          });
+          }
+          : {
+            target: 'gist',
+            gistId: form.gistId.trim(),
+            authMode: form.authMode,
+            githubTokenEnv: form.githubTokenEnv.trim(),
+          };
+        try {
+          const payload = await runAction('configure', body);
           setOutcome({ action: 'configure', ok: payload.ok !== false, result: payload.result ?? payload });
           setEditing(false);
         } catch (error) {
@@ -618,23 +717,30 @@ window.__ModuleLoader__.load({
         await refresh();
       };
 
+      /** The target the host actually syncs with. */
+      const hostTarget = status !== null && status.target === 'repo' ? 'repo' : 'gist';
+      /** The target the user is choosing in the form. */
+      const formTarget = form.target === 'repo' ? 'repo' : 'gist';
       const configured = status !== null && status.configured === true;
-      const checkout = status && status.checkout ? status.checkout : undefined;
+      const cache = status && status.cache ? status.cache : undefined;
       const auth = status && status.authentication ? status.authentication : undefined;
       const drift = status && status.drift ? status.drift : undefined;
       const remote = status && status.remote ? status.remote : undefined;
 
       /**
-       * Why the repository cannot be used right now, or undefined when it can.
+       * Why the remote cannot be used right now, or undefined when it can.
        *
-       * An operation that needs the repository — snapshot, push, pull, diff —
+       * An operation that needs the remote — snapshot, push, pull, diff —
        * would fail with a transport error otherwise, so the buttons stay
-       * disabled until the host confirms the repository is reachable and
-       * usable from this device.
+       * disabled until the host confirms the remote is reachable and usable
+       * from this device.
+       *
+       * A gist target is not blocked by having no gist: the first push
+       * creates one. Only a repository target needs a repository assigned.
        */
       const blocked = status === null
         ? 'loading'
-        : configured !== true
+        : hostTarget === 'repo' && configured !== true
           ? 'notConfigured'
           : remote === undefined
             ? (probing === true ? 'checking' : 'unknown')
@@ -647,33 +753,53 @@ window.__ModuleLoader__.load({
       const operationsDisabled = busy !== null || blocked !== undefined;
       /** A credential that may only read cannot publish the snapshot. */
       const readOnly = remote !== undefined && remote.access !== undefined && remote.access.canPush === false;
+      const readOnlyText = hostTarget === 'gist' ? t('actions.blocked.readOnlyGist') : t('actions.blocked.readOnly');
       const pushDisabled = operationsDisabled || readOnly === true;
-      const pushTitle = readOnly === true ? t('actions.blocked.readOnly') : blockedText;
+      const pushTitle = readOnly === true ? readOnlyText : blockedText;
 
       const statusRows = [];
       if (status !== null) {
-        statusRows.push(h(Row, { key: 'repo', label: t('field.repository'), value: status.repository ?? t('notConfigured') }));
-        statusRows.push(h(Row, { key: 'branch', label: t('field.branch'), value: status.branch ?? t('unknown') }));
+        // The target the host syncs with comes first: it says what every row
+        // below describes.
+        statusRows.push(h(Row, { key: 'target', label: t('field.target'), value: hostTarget === 'repo' ? t('target.repo') : t('target.gist') }));
+        if (hostTarget === 'gist') {
+          const gist = status.gist;
+          statusRows.push(h(Row, {
+            key: 'gist',
+            label: t('field.gist'),
+            value: gist === undefined
+              ? t('notConfiguredGist')
+              : h('span', null,
+                h('span', { className: 'dsh-sync-mono' }, gist.id ?? ''),
+                gist.url !== undefined && gist.url !== ''
+                  ? h('span', { className: 'dsh-sync-mono' }, ` · ${gist.url}`)
+                  : null,
+              ),
+          }));
+        } else {
+          statusRows.push(h(Row, { key: 'repo', label: t('field.repository'), value: status.repository ?? t('notConfigured') }));
+          statusRows.push(h(Row, { key: 'branch', label: t('field.branch'), value: status.branch ?? t('unknown') }));
+        }
         if (auth !== undefined) {
           statusRows.push(h(Row, { key: 'auth', label: t('field.auth'), value: authText(auth) }));
         }
-        if (checkout !== undefined) {
+        statusRows.push(h(Row, {
+          key: 'cache',
+          label: t('field.cache'),
+          value: cache !== undefined && cache.initialized === true
+            ? h('span', { className: 'dsh-sync-mono' }, cache.path ?? '')
+            : t('status.cacheMissing'),
+        }));
+        // The working tree belongs to the git checkout of the repository
+        // target; a gist has neither a branch nor a working tree.
+        if (hostTarget === 'repo' && cache !== undefined && cache.initialized === true) {
           statusRows.push(h(Row, {
-            key: 'checkout',
-            label: t('field.checkout'),
-            value: checkout.initialized === true
-              ? h('span', { className: 'dsh-sync-mono' }, checkout.path ?? '')
-              : t('status.checkoutMissing'),
+            key: 'clean',
+            label: t('field.device'),
+            value: cache.clean === true
+              ? `${t('status.clean')}${cache.aheadUpstream !== undefined ? ` · ${t('status.aheadBehind', { ahead: cache.aheadUpstream ?? 0, behind: cache.behindUpstream ?? 0 })}` : ''}`
+              : t('status.dirty'),
           }));
-          if (checkout.initialized === true) {
-            statusRows.push(h(Row, {
-              key: 'clean',
-              label: t('field.device'),
-              value: checkout.clean === true
-                ? `${t('status.clean')}${checkout.aheadUpstream !== undefined ? ` · ${t('status.aheadBehind', { ahead: checkout.aheadUpstream ?? 0, behind: checkout.behindUpstream ?? 0 })}` : ''}`
-                : t('status.dirty'),
-            }));
-          }
         }
         if (drift !== undefined) {
           const counts = drift.counts ?? {};
@@ -688,24 +814,31 @@ window.__ModuleLoader__.load({
                 configs: counts.configsChanged ?? 0,
               }),
           }));
+        } else if (cache !== undefined && cache.initialized !== true) {
+          // No local snapshot yet, so there is nothing to compare against.
+          statusRows.push(h(Row, { key: 'drift', label: t('field.drift'), value: t('status.noSnapshot') }));
         }
         if (remote !== undefined) {
           const access = remote.access;
           const accessText = access === undefined
             ? undefined
             : access.canPush === true ? t('status.access.canPush') : t('status.access.readOnly');
+          const remoteLabel = hostTarget === 'gist' ? t('field.remoteGist') : t('field.remote');
+          const remoteText = remote.reachable === true
+            ? hostTarget === 'gist'
+              ? `${t('remote.reachable')} · ${remote.hasFile === true ? t('remote.hasFile') : t('remote.noFile')}`
+              : `${t('remote.reachable')} · ${remote.hasBranch === true ? t('remote.hasBranch') : t('remote.noBranch')}`
+            : `${t('remote.unreachable')} · ${t(REASON_TEXT[remote.reason] ?? 'remote.reason.unknown')}`;
           statusRows.push(h(Row, {
             key: 'remote',
-            label: t('field.remote'),
+            label: remoteLabel,
             value: [
-              remote.reachable === true
-                ? `${t('remote.reachable')} · ${remote.hasBranch === true ? t('remote.hasBranch') : t('remote.noBranch')}`
-                : `${t('remote.unreachable')} · ${t(REASON_TEXT[remote.reason] ?? 'remote.reason.unknown')}`,
+              remoteText,
               ...(accessText === undefined ? [] : [accessText]),
             ].join(' · '),
           }));
         } else if (probing === true) {
-          statusRows.push(h(Row, { key: 'remote', label: t('field.remote'), value: t('remote.checking') }));
+          statusRows.push(h(Row, { key: 'remote', label: hostTarget === 'gist' ? t('field.remoteGist') : t('field.remote'), value: t('remote.checking') }));
         }
       }
 
@@ -719,7 +852,7 @@ window.__ModuleLoader__.load({
        */
       const statusSummary = (() => {
         if (status === null) return t('busy');
-        if (configured !== true) return t('notConfigured');
+        if (configured !== true) return hostTarget === 'gist' ? t('notConfiguredGist') : t('notConfigured');
         const parts = [];
         if (auth !== undefined) {
           if (auth.mode === 'gh') {
@@ -758,34 +891,68 @@ window.__ModuleLoader__.load({
               : null,
 
             h('section', { className: 'dsh-sync-card' },
-              h('div', { className: 'dsh-sync-card-title' }, t('card.repository')),
-              configured === false && status !== null
+              h('div', { className: 'dsh-sync-card-title' }, t('card.settings')),
+
+              // The target selector: the manifest lives either in a gist or in
+              // a repository branch, and the form below follows it.
+              h('div', { className: 'dsh-sync-field' },
+                h('label', { className: 'dsh-sync-label' }, t('field.target')),
+                h('select', {
+                  className: 'dsh-sync-input',
+                  value: formTarget,
+                  onChange: (event) => {
+                    targetTouched.current = true;
+                    setForm((current) => ({ ...current, target: event.target.value }));
+                  },
+                },
+                  h('option', { value: 'gist' }, t('target.gist')),
+                  h('option', { value: 'repo' }, t('target.repo')),
+                ),
+              ),
+
+              status !== null && (!configured || formTarget !== hostTarget)
                 ? h('div', null,
-                  h('div', { className: 'dsh-sync-warn' }, t('notConfigured')),
-                  h('div', { className: 'dsh-sync-note' }, t('notConfiguredHint')),
+                  h('div', { className: 'dsh-sync-warn' }, formTarget === 'gist' ? t('notConfiguredGist') : t('notConfigured')),
+                  h('div', { className: 'dsh-sync-note' }, formTarget === 'gist' ? t('notConfiguredHintGist') : t('notConfiguredHint')),
                 )
                 : null,
               editing === true
                 ? h('div', null,
-                  h('div', { className: 'dsh-sync-field' },
-                    h('label', { className: 'dsh-sync-label' }, t('field.repository')),
-                    h('input', {
-                      className: 'dsh-sync-input',
-                      type: 'text',
-                      value: form.repoUrl,
-                      placeholder: t('placeholder.repository'),
-                      onChange: (event) => { setFormTouched(true); setForm((current) => ({ ...current, repoUrl: event.target.value })); },
-                    }),
-                  ),
-                  h('div', { className: 'dsh-sync-field' },
-                    h('label', { className: 'dsh-sync-label' }, t('field.branch')),
-                    h('input', {
-                      className: 'dsh-sync-input',
-                      type: 'text',
-                      value: form.branch,
-                      onChange: (event) => { setFormTouched(true); setForm((current) => ({ ...current, branch: event.target.value })); },
-                    }),
-                  ),
+                  formTarget === 'gist'
+                    ? h('div', null,
+                      h('div', { className: 'dsh-sync-field' },
+                        h('label', { className: 'dsh-sync-label' }, t('field.gistId')),
+                        h('input', {
+                          className: 'dsh-sync-input',
+                          type: 'text',
+                          value: form.gistId,
+                          placeholder: t('placeholder.gistId'),
+                          onChange: (event) => { setFormTouched(true); setForm((current) => ({ ...current, gistId: event.target.value })); },
+                        }),
+                      ),
+                      h('div', { className: 'dsh-sync-note', style: { marginTop: '4px' } }, t('note.gistSecret')),
+                    )
+                    : h('div', null,
+                      h('div', { className: 'dsh-sync-field' },
+                        h('label', { className: 'dsh-sync-label' }, t('field.repository')),
+                        h('input', {
+                          className: 'dsh-sync-input',
+                          type: 'text',
+                          value: form.repoUrl,
+                          placeholder: t('placeholder.repository'),
+                          onChange: (event) => { setFormTouched(true); setForm((current) => ({ ...current, repoUrl: event.target.value })); },
+                        }),
+                      ),
+                      h('div', { className: 'dsh-sync-field' },
+                        h('label', { className: 'dsh-sync-label' }, t('field.branch')),
+                        h('input', {
+                          className: 'dsh-sync-input',
+                          type: 'text',
+                          value: form.branch,
+                          onChange: (event) => { setFormTouched(true); setForm((current) => ({ ...current, branch: event.target.value })); },
+                        }),
+                      ),
+                    ),
                   h('div', { className: 'dsh-sync-field' },
                     h('label', { className: 'dsh-sync-label' }, t('field.authMode')),
                     h('select', {
@@ -818,8 +985,8 @@ window.__ModuleLoader__.load({
                   h(Button, { label: t('btn.edit'), disabled: busy !== null, onClick: () => { setFormTouched(false); setEditing(true); } }),
                 ),
 
-              // The status describes the repository configured right above it,
-              // so it lives inside that card as a disclosure rather than
+              // The status describes the target configured right above it, so
+              // it lives inside that card as a disclosure rather than
               // standing on its own.
               h('div', { className: 'dsh-sync-disclosure' },
                 h('button', {
@@ -861,15 +1028,15 @@ window.__ModuleLoader__.load({
               h('div', { className: 'dsh-sync-actions' },
                 h(Button, { label: busy === 'status' ? t('busy') : t('btn.refresh'), disabled: busy !== null, onClick: doRefresh }),
                 h(Button, { label: busy === 'snapshot' ? t('busy') : t('btn.snapshot'), disabled: operationsDisabled, title: blockedText, onClick: () => act('snapshot') }),
-                h(Button, { label: busy === 'push' ? t('busy') : t('btn.push'), primary: true, disabled: pushDisabled, title: pushTitle, onClick: () => act('push') }),
-                h(Button, { label: busy === 'pull' ? t('busy') : t('btn.pull'), primary: true, disabled: operationsDisabled, title: blockedText, onClick: () => act('pull') }),
+                h(Button, { label: busy === 'push' ? t('busy') : (hostTarget === 'gist' ? t('btn.pushGist') : t('btn.push')), primary: true, disabled: pushDisabled, title: pushTitle, onClick: () => act('push') }),
+                h(Button, { label: busy === 'pull' ? t('busy') : (hostTarget === 'gist' ? t('btn.pullGist') : t('btn.pull')), primary: true, disabled: operationsDisabled, title: blockedText, onClick: () => act('pull') }),
                 h(Button, { label: busy === 'diff' ? t('busy') : t('btn.diff'), disabled: operationsDisabled, title: blockedText, onClick: () => act('diff') }),
               ),
               blockedText !== undefined
                 ? h('div', { className: 'dsh-sync-note dsh-sync-warn', style: { marginTop: '10px' } }, blockedText)
                 : null,
               readOnly === true
-                ? h('div', { className: 'dsh-sync-note dsh-sync-warn', style: { marginTop: '10px' } }, t('actions.blocked.readOnly'))
+                ? h('div', { className: 'dsh-sync-note dsh-sync-warn', style: { marginTop: '10px' } }, readOnlyText)
                 : null,
               h('div', { className: 'dsh-sync-note', style: { marginTop: '10px' } }, t('note.tool')),
             ),

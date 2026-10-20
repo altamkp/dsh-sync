@@ -1,14 +1,23 @@
 /**
  * DSH Sync — sync DeepSeek Harness plugins and settings across devices
- * through a GitHub repository the user owns.
+ * through a GitHub Gist (the default) or a GitHub repository the user owns.
  *
- * A git checkout under ~/.dsh-sync/<profile>/repo is the local cache. Every
- * snapshot regenerates dsh-sync.json from live Harness state and commits it
- * (snapshot); push additionally pushes the branch to GitHub; pull resets the
- * checkout to the remote branch and applies the manifest through the same
- * services the Web UI uses — pluginManager for bundles and plugin rows,
- * configEditor for plugin configurations. Secret-shaped config values are
- * never written to the manifest.
+ * Both targets carry the same manifest, dsh-sync.json, regenerated from live
+ * Harness state on every snapshot:
+ *
+ * - gist: the manifest travels through the GitHub API into a secret gist.
+ *   The copy under ~/.dsh-sync/<profile>/gist is this device's own record.
+ *   The first push creates the gist and remembers its id in the plugin's own
+ *   configuration, so the id reaches the other devices inside the manifest
+ *   itself.
+ * - repo: a git checkout under ~/.dsh-sync/<profile>/repo is the local
+ *   cache; snapshot commits the manifest, push publishes the branch, pull
+ *   resets the checkout to the remote branch.
+ *
+ * Pull applies the manifest through the same services the Web UI uses —
+ * pluginManager for bundles and plugin rows, configEditor for plugin
+ * configurations. Secret-shaped config values are never written to the
+ * manifest.
  */
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -24,6 +33,8 @@ const DEFAULT_SECRET_SEGMENTS = ['key', 'token', 'tokens', 'secret', 'password',
 const DEFAULT_BENIGN_QUALIFIERS = ['max', 'min', 'limit', 'limits', 'output', 'inline', 'total', 'default', 'context', 'window', 'input', 'completion', 'prompt', 'reasoning', 'cached', 'budget', 'threshold', 'per'];
 const READ_ACTIONS = new Set(['status', 'diff']);
 const LIST_LIMIT = 25;
+/** The GitHub REST API the gist calls go to. */
+const GIST_API = 'https://api.github.com';
 /** Timeout for the reachability probe the page and the tool's status use. */
 const PROBE_TIMEOUT_MS = 15000;
 /** Timeout for one GitHub CLI call. */
@@ -31,9 +42,12 @@ const GH_TIMEOUT_MS = 15000;
 
 /** Plugin configuration; users edit these values in the profile patch. */
 export const Config = z.object({
-  repoUrl: z.string().default('').description('GitHub repository that holds the sync snapshot, e.g. https://github.com/<owner>/<repo>. Empty until dsh_sync configure assigns one.'),
-  branch: z.string().default('main').description('Branch to sync on the remote repository.'),
-  authMode: z.union([z.const('gh'), z.const('pat')]).default('gh').description('How the GitHub repository is authenticated. "gh" (the default) uses the credential of the account the GitHub CLI is logged in as; "pat" uses the personal access token found in the environment variable named by githubTokenEnv. An SSH remote is authenticated by your SSH key in either mode.'),
+  target: z.union([z.const('gist'), z.const('repo')]).default('gist').description('Where the sync snapshot lives: a GitHub Gist (the default) or a GitHub repository. A gist needs no repository and no branch — the snapshot travels through the GitHub API into a secret gist only you can see. A repository keeps the git flow of earlier versions.'),
+  repoUrl: z.string().default('').description('GitHub repository that holds the sync snapshot, used when target is "repo", e.g. https://github.com/<owner>/<repo>. Empty until dsh_sync configure assigns one.'),
+  branch: z.string().default('main').description('Branch to sync on the remote repository; used when target is "repo".'),
+  gistId: z.string().default('').description('The GitHub Gist that holds the sync snapshot, used when target is "gist". A bare gist id, a https://gist.github.com/<user>/<id> URL, or a https://api.github.com/gists/<id> URL are all accepted. Empty until dsh_sync configure assigns one; the first push creates a secret gist and remembers its id when this is empty.'),
+  gistDescription: z.string().default('DSH Sync').description('Description of the GitHub Gist the plugin creates when target is "gist".'),
+  authMode: z.union([z.const('gh'), z.const('pat')]).default('gh').description('How GitHub is authenticated; both targets use the same credential. "gh" (the default) uses the credential of the account the GitHub CLI is logged in as; "pat" uses the personal access token found in the environment variable named by githubTokenEnv. An SSH remote is authenticated by your SSH key in either mode.'),
   githubTokenEnv: z.string().default('DSH_SYNC_GITHUB_TOKEN').description('Name of the environment variable holding the GitHub personal access token used for HTTPS remotes when authMode is "pat". When unset, git credential helpers or SSH remotes provide access.'),
   commitName: z.string().default('DSH Sync').description('Git author name for snapshot commits.'),
   commitEmail: z.string().default('dsh-sync@users.noreply.github.com').description('Git author email for snapshot commits.'),
@@ -396,8 +410,11 @@ function authenticationBlock(settings, credentials, remote) {
     source: credentials.source,
   };
   if (credentials.account !== undefined) block.account = credentials.account;
+  // The name of the environment variable is not a secret, and the page needs
+  // it in every mode: a form that does not know it would save an empty name
+  // over the configured one.
+  if (settings.githubTokenEnv !== '') block.tokenEnv = settings.githubTokenEnv;
   if (credentials.mode === 'pat') {
-    block.tokenEnv = settings.githubTokenEnv;
     block.tokenPresent = credentials.token !== undefined;
   } else {
     block.cliAvailable = credentials.reason !== 'missing-gh';
@@ -483,10 +500,19 @@ function validBranch(branch) {
     && !branch.includes('..') && !branch.includes('//') && !branch.includes('@{');
 }
 
-function checkoutDirectory(ctx) {
+/** The profile's own directory name under ~/.dsh-sync, safe for every file system. */
+function profileSlug(ctx) {
   const profile = String(ctx.profileContext?.name ?? 'default');
-  const safe = profile.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'default';
-  return join(homedir(), '.dsh-sync', safe, 'repo');
+  return profile.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'default';
+}
+
+function checkoutDirectory(ctx) {
+  return join(homedir(), '.dsh-sync', profileSlug(ctx), 'repo');
+}
+
+/** Where the gist flow keeps its local copy of the snapshot. */
+function gistCacheDirectory(ctx) {
+  return join(homedir(), '.dsh-sync', profileSlug(ctx), 'gist');
 }
 
 /**
@@ -528,6 +554,150 @@ async function ensureCheckout(ctx, settings, remote, { fetch, signal }) {
     }
   }
   return { dir, env, hasRemoteBranch, fetchError, signal, credentials, credentialHint: credentialHint(settings, credentials) };
+}
+
+/* ------------------------------- gist engine ------------------------------ */
+
+/**
+ * The id of a gist, from an id, a gist URL, or an API URL.
+ *
+ * The user pastes whatever their browser showed them, so all three forms are
+ * accepted; the id itself is what the API needs.
+ */
+function parseGistId(raw) {
+  const text = String(raw ?? '').trim();
+  if (text === '') return undefined;
+  const patterns = [
+    /^(?:https?:\/\/)?gist\.github\.com\/(?:[^/\s#?]+\/)?([0-9a-f]{6,64})\/?(?:[?#].*)?$/i,
+    /^(?:https?:\/\/)?api\.github\.com\/gists\/([0-9a-f]{6,64})\/?(?:[?#].*)?$/i,
+    /^([0-9a-f]{6,64})$/i,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(text);
+    if (match !== null) return match[1].toLowerCase();
+  }
+  return undefined;
+}
+
+/** Why the GitHub API refused a call. */
+function githubFailureReason(status) {
+  if (status === 401 || status === 403) return 'denied';
+  if (status === 404) return 'not-found';
+  return 'unknown';
+}
+
+/**
+ * One call to the GitHub API.
+ *
+ * The answer is normalized into { ok, status, payload, headers, error, reason }.
+ * The caller has to tell "the gist is not there" from "the credential may not
+ * see it" — the API answers both with 404, and both mean the same thing to a
+ * client, so 404 becomes the `not-found` reason.
+ */
+async function githubApi(credentials, path, { method = 'GET', body, signal } = {}) {
+  const headers = {
+    accept: 'application/vnd.github+json',
+    'user-agent': 'dsh-sync',
+    'x-github-api-version': '2022-11-28',
+  };
+  if (credentials?.token !== undefined) headers.authorization = `Bearer ${credentials.token}`;
+  if (body !== undefined) headers['content-type'] = 'application/json';
+  let response;
+  try {
+    response = await fetch(`${GIST_API}${path}`, {
+      method,
+      headers,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(signal === undefined ? {} : { signal }),
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      reason: 'unreachable',
+      error: `the GitHub API could not be reached: ${String(error?.message ?? error)}`,
+    };
+  }
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = undefined;
+  }
+  if (!response.ok) {
+    const message = typeof payload?.message === 'string' ? payload.message : `the GitHub API answered ${response.status}`;
+    return { ok: false, status: response.status, reason: githubFailureReason(response.status), error: message };
+  }
+  return { ok: true, status: response.status, payload, headers: response.headers };
+}
+
+/**
+ * Read one gist, with the manifest file's content.
+ *
+ * A file larger than a megabyte arrives truncated, so the raw URL is fetched
+ * in that case; the manifest is far smaller, but the answer has to be right
+ * either way.
+ */
+async function readGist(credentials, id, { signal } = {}) {
+  const response = await githubApi(credentials, `/gists/${id}`, { signal });
+  if (!response.ok) return response;
+  const gist = response.payload ?? {};
+  const file = gist.files?.[MANIFEST_FILE];
+  let content;
+  if (file !== undefined) {
+    if (file.truncated === true && typeof file.raw_url === 'string') {
+      const raw = await fetch(file.raw_url, {
+        headers: {
+          'user-agent': 'dsh-sync',
+          ...(credentials?.token === undefined ? {} : { authorization: `Bearer ${credentials.token}` }),
+        },
+        ...(signal === undefined ? {} : { signal }),
+      });
+      content = raw.ok ? await raw.text() : undefined;
+    } else {
+      content = typeof file.content === 'string' ? file.content : undefined;
+    }
+  }
+  return { ...response, gist, file, content };
+}
+
+/**
+ * Create or update the gist that holds the manifest.
+ *
+ * The gist is created secret: a snapshot lists the plugins and the settings
+ * of a device, and a secret gist is visible to nobody but its owner — the
+ * same privacy a private repository gives.
+ */
+async function writeGist(credentials, { id, description, content }, { signal } = {}) {
+  const files = { [MANIFEST_FILE]: { content } };
+  if (id === undefined || id === '') {
+    const created = await githubApi(credentials, '/gists', {
+      method: 'POST',
+      body: { description, public: false, files },
+      signal,
+    });
+    if (!created.ok) return created;
+    return { ...created, created: true, gist: created.payload };
+  }
+  const updated = await githubApi(credentials, `/gists/${id}`, {
+    method: 'PATCH',
+    body: { description, files },
+    signal,
+  });
+  if (!updated.ok) return updated;
+  return { ...updated, created: false, gist: updated.payload };
+}
+
+/** The account and the scopes the credential holds, as the API reports them. */
+async function githubIdentity(credentials, { signal } = {}) {
+  const response = await githubApi(credentials, '/user', { signal });
+  if (!response.ok) return response;
+  const account = typeof response.payload?.login === 'string' ? response.payload.login : undefined;
+  const header = response.headers?.get?.('x-oauth-scopes');
+  const scopes = typeof header === 'string'
+    ? header.split(',').map((scope) => scope.trim()).filter((scope) => scope !== '')
+    : undefined;
+  return { ...response, account, scopes };
 }
 
 /* --------------------------- manifest read/write -------------------------- */
@@ -584,18 +754,59 @@ async function gatherState(ctx, settings) {
   };
 }
 
-async function writeManifest(dir, manifest) {
-  await fsp.writeFile(join(dir, MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+/** The manifest's text form, as it is written to disk and into a gist. */
+function manifestText(manifest) {
+  return `${JSON.stringify(manifest, null, 2)}\n`;
 }
 
-async function readManifest(dir) {
-  const path = join(dir, MANIFEST_FILE);
+async function writeManifest(dir, manifest) {
+  await fsp.writeFile(join(dir, MANIFEST_FILE), manifestText(manifest), 'utf8');
+}
+
+/**
+ * Read a manifest and check that this device understands it.
+ *
+ * The version check is the same for a file in a git checkout and for a file
+ * in a gist, so both go through here.
+ */
+async function readManifestFile(path) {
   if (!existsSync(path)) return undefined;
   const raw = JSON.parse(await fsp.readFile(path, 'utf8'));
   if (raw?.manifestVersion !== MANIFEST_VERSION) {
     throw new Error(`dsh-sync: unsupported manifest version ${JSON.stringify(raw?.manifestVersion)} in ${MANIFEST_FILE}; this device runs manifest version ${MANIFEST_VERSION}`);
   }
   return raw;
+}
+
+function readManifest(dir) {
+  return readManifestFile(join(dir, MANIFEST_FILE));
+}
+
+/** Parse a manifest from text, or undefined when it is not one this device understands. */
+function parseManifest(text) {
+  try {
+    const raw = JSON.parse(text);
+    if (raw?.manifestVersion !== MANIFEST_VERSION) return undefined;
+    return raw;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether two manifests describe the same state.
+ *
+ * Every snapshot carries the moment it was taken, so that timestamp always
+ * differs; the content behind it is what "the same snapshot" means.
+ */
+function sameManifest(a, b) {
+  if (a === undefined || b === undefined) return false;
+  const strip = (manifest) => {
+    const copy = { ...manifest };
+    delete copy.createdAt;
+    return stable(copy);
+  };
+  return strip(a) === strip(b);
 }
 
 /* ------------------------------- apply logic ------------------------------ */
@@ -764,7 +975,13 @@ async function applyManifest(ctx, manifest) {
 
 /* ------------------------------ sync actions ------------------------------ */
 
-async function doSnapshot(ctx, settings, { push, overrideUrl, signal }) {
+/** The target an action runs against: a gist or a repository. */
+function resolveTarget(settings, override) {
+  const value = String(override ?? settings.target ?? '').trim().toLowerCase();
+  return value === 'repo' ? 'repo' : 'gist';
+}
+
+async function doRepoSnapshot(ctx, settings, { push, overrideUrl, signal }) {
   const parsed = parseGithubRemote(overrideUrl ?? settings.repoUrl);
   if (parsed === undefined) {
     throw new Error('dsh-sync: no repository assigned yet — call dsh_sync action=configure repoUrl=<github repository>, or pass repoUrl for this call only');
@@ -786,7 +1003,7 @@ async function doSnapshot(ctx, settings, { push, overrideUrl, signal }) {
   mustGit(await runGit(settings, ['add', '-A'], cwd), 'stage manifest');
   const status = await runGit(settings, ['status', '--porcelain'], cwd);
   mustGit(status, 'read status');
-  const result = { repository: parsed, branch: settings.branch, device: manifest.device };
+  const result = { target: 'repo', repository: parsed, branch: settings.branch, device: manifest.device };
 
   if (status.stdout.trim() === '') {
     return { ...result, committed: false, pushed: false, note: 'local state already matches the committed snapshot; nothing to commit' };
@@ -815,7 +1032,7 @@ async function doSnapshot(ctx, settings, { push, overrideUrl, signal }) {
   return { ...result, pushed: true, summary: { bundles: manifest.bundles.length, plugins: manifest.plugins.length, configs: manifest.configs.length } };
 }
 
-async function doPull(ctx, settings, { overrideUrl, signal }) {
+async function doRepoPull(ctx, settings, { overrideUrl, signal }) {
   const parsed = parseGithubRemote(overrideUrl ?? settings.repoUrl);
   if (parsed === undefined) {
     throw new Error('dsh-sync: no repository assigned yet — call dsh_sync action=configure repoUrl=<github repository>, or pass repoUrl for this call only');
@@ -833,6 +1050,7 @@ async function doPull(ctx, settings, { overrideUrl, signal }) {
   }
   const applied = await applyManifest(ctx, manifest);
   return {
+    target: 'repo',
     repository: parsed,
     branch: settings.branch,
     manifest: { createdAt: manifest.createdAt, device: manifest.device, profile: manifest.profile },
@@ -868,7 +1086,7 @@ function diffManifests(current, committed) {
   return diff;
 }
 
-async function doStatus(ctx, settings, { probeRemote, overrideUrl, signal }) {
+async function doRepoStatus(ctx, settings, { probeRemote, overrideUrl, signal }) {
   let parsed;
   let configError;
   try {
@@ -878,6 +1096,7 @@ async function doStatus(ctx, settings, { probeRemote, overrideUrl, signal }) {
   }
   const credentials = await resolveCredentials(settings, { signal });
   const out = {
+    target: 'repo',
     configured: parsed !== undefined,
     ...(parsed !== undefined ? { repository: parsed } : {}),
     branch: settings.branch,
@@ -885,13 +1104,13 @@ async function doStatus(ctx, settings, { probeRemote, overrideUrl, signal }) {
     ...(configError !== undefined ? { configError } : {}),
   };
   if (parsed === undefined) {
-    out.hint = 'assign a repository first: dsh_sync action=configure repoUrl=https://github.com/<owner>/<repo>';
+    out.hint = 'assign a repository first: dsh_sync action=configure target=repo repoUrl=https://github.com/<owner>/<repo>';
     return out;
   }
 
   const dir = checkoutDirectory(ctx);
   if (!existsSync(join(dir, '.git'))) {
-    out.checkout = { path: dir, initialized: false, note: 'the first snapshot, push, or pull creates it' };
+    out.cache = { path: dir, initialized: false, kind: 'repo', note: 'the first snapshot, push, or pull creates it' };
   } else {
     const env = authEnvironment(settings, parsed, credentials);
     const cwd = { cwd: dir, env, signal };
@@ -900,9 +1119,10 @@ async function doStatus(ctx, settings, { probeRemote, overrideUrl, signal }) {
     const head = await runGit(settings, ['rev-parse', 'HEAD'], cwd);
     const log = head.code === 0 ? await runGit(settings, ['log', '-1', '--format=%cI %s'], cwd) : undefined;
     const upstream = await runGit(settings, ['rev-list', '--left-right', '--count', '@{u}...HEAD'], cwd);
-    out.checkout = {
+    out.cache = {
       path: dir,
       initialized: true,
+      kind: 'repo',
       ...(branch.code === 0 ? { branch: branch.stdout.trim() } : {}),
       ...(head.code === 0 ? { head: head.stdout.trim().slice(0, 12) } : {}),
       clean: dirty.code === 0 && dirty.stdout.trim() === '',
@@ -928,7 +1148,7 @@ async function doStatus(ctx, settings, { probeRemote, overrideUrl, signal }) {
         },
       };
     } else {
-      out.checkout.manifest = `no ${MANIFEST_FILE} committed yet`;
+      out.cache.manifest = `no ${MANIFEST_FILE} committed yet`;
     }
   }
 
@@ -961,15 +1181,213 @@ async function doStatus(ctx, settings, { probeRemote, overrideUrl, signal }) {
   return out;
 }
 
-async function doDiff(ctx, settings, { overrideUrl, signal }) {
-  const dir = checkoutDirectory(ctx);
-  const committed = existsSync(join(dir, '.git')) ? await readManifest(dir).catch(() => undefined) : undefined;
+/**
+ * The state of the gist flow.
+ *
+ * A gist has no branch and no checkout, so the local copy of the snapshot is
+ * the only thing this device keeps; the drift compares the live state with
+ * that copy, exactly as the repository flow compares it with the commit.
+ */
+async function doGistStatus(ctx, settings, { probeRemote, overrideGistId, signal }) {
+  const credentials = await resolveCredentials(settings, { signal });
+  const gistId = parseGistId(overrideGistId ?? settings.gistId) ?? '';
+  const dir = gistCacheDirectory(ctx);
+  const out = {
+    target: 'gist',
+    configured: gistId !== '',
+    authentication: authenticationBlock(settings, credentials, undefined),
+    cache: { path: dir, initialized: existsSync(join(dir, MANIFEST_FILE)), kind: 'gist' },
+  };
+  if (gistId !== '') out.gist = { id: gistId, url: `https://gist.github.com/${gistId}` };
+  else out.hint = 'no gist is assigned yet — the first push creates a secret gist and remembers its id';
+
+  const cached = await readManifestFile(join(dir, MANIFEST_FILE)).catch(() => undefined);
+  if (cached !== undefined) {
+    const current = await gatherState(ctx, settings);
+    const diff = diffManifests(current, cached);
+    out.drift = {
+      equalsCommittedSnapshot: diff.equal,
+      counts: {
+        bundlesChanged: diff.bundles.added.length + diff.bundles.removed.length + diff.bundles.changed.length,
+        pluginsChanged: diff.plugins.added.length + diff.plugins.removed.length + diff.plugins.changed.length,
+        configsChanged: diff.configs.added.length + diff.configs.removed.length + diff.configs.changed.length,
+      },
+    };
+  }
+
+  if (probeRemote === true) {
+    const identity = await githubIdentity(credentials, { signal });
+    if (!identity.ok) {
+      out.remote = {
+        reachable: false,
+        reason: identity.reason ?? 'denied',
+        error: identity.error,
+        ...(credentials.error === undefined ? {} : { authError: credentials.error }),
+      };
+    } else {
+      if (identity.account !== undefined && out.authentication.account === undefined) {
+        out.authentication.account = identity.account;
+      }
+      if (identity.scopes !== undefined) {
+        out.authentication.scopes = identity.scopes;
+        out.authentication.gistScope = identity.scopes.includes('gist');
+      }
+      if (gistId === '') {
+        // No gist yet: the API answered and the credential is accepted, which
+        // is what the first push needs.
+        out.remote = { reachable: true, access: { canPush: out.authentication.gistScope !== false } };
+      } else {
+        const read = await readGist(credentials, gistId, { signal });
+        if (!read.ok) {
+          out.remote = {
+            reachable: false,
+            reason: read.reason ?? 'unknown',
+            error: read.error,
+            ...(credentials.error === undefined ? {} : { authError: credentials.error }),
+          };
+        } else {
+          out.remote = { reachable: true, hasFile: read.file !== undefined, access: { canPush: out.authentication.gistScope !== false } };
+          if (typeof read.gist?.html_url === 'string') out.gist.url = read.gist.html_url;
+          if (typeof read.gist?.description === 'string' && read.gist.description !== '') {
+            out.gist.description = read.gist.description;
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Take a snapshot and, when asked, publish it.
+ *
+ * A gist is written through the API, so there is no commit: the local copy
+ * under ~/.dsh-sync is the device's own record, and the gist is the shared
+ * one.
+ */
+async function doGistSnapshot(ctx, settings, { push, overrideGistId, signal }) {
+  const credentials = await resolveCredentials(settings, { signal });
+  if (credentials.token === undefined) {
+    throw new Error(`dsh-sync: the gist API needs a GitHub token — ${credentialHint(settings, credentials) ?? 'no credential is configured'}`);
+  }
+  const manifest = await gatherState(ctx, settings);
+  const dir = gistCacheDirectory(ctx);
+  await fsp.mkdir(dir, { recursive: true });
+  await fsp.writeFile(join(dir, MANIFEST_FILE), manifestText(manifest), 'utf8');
+  const result = { target: 'gist', committed: true, pushed: false, device: manifest.device, cache: dir };
+  if (!push) {
+    return { ...result, note: 'the snapshot is in the local cache; call push to publish it to the gist' };
+  }
+
+  const gistId = parseGistId(overrideGistId ?? settings.gistId) ?? '';
+  if (gistId !== '') {
+    const read = await readGist(credentials, gistId, { signal });
+    if (!read.ok) throw new Error(`dsh-sync: cannot read the gist ${gistId}: ${read.error}`);
+    const remote = read.content === undefined ? undefined : parseManifest(read.content);
+    if (remote !== undefined && sameManifest(remote, manifest)) {
+      return { ...result, gistId, gistUrl: read.gist?.html_url, pushed: false, note: 'the gist already holds this snapshot' };
+    }
+  }
+
+  const written = await writeGist(credentials, { id: gistId, description: settings.gistDescription, content: manifestText(manifest) }, { signal });
+  if (!written.ok) throw new Error(`dsh-sync: cannot write the gist: ${written.error}`);
+  const id = written.gist?.id ?? gistId;
+  const url = written.gist?.html_url ?? `https://gist.github.com/${id}`;
+  let published = manifest;
+
+  if (id !== '' && id !== settings.gistId) {
+    // Remembering the gist here hands its id to the other devices through
+    // the manifest this push publishes.
+    let remembered = false;
+    try {
+      remembered = await persistSetting(ctx, 'gistId', id);
+    } catch (error) {
+      result.note = `the gist id ${id} could not be written to the configuration (${String(error?.message ?? error)}) — assign it by hand to keep using it`;
+    }
+    if (remembered) {
+      // The manifest now carries the id, so publish it once more: the other
+      // devices learn the gist from the manifest they pull.
+      const refreshed = await gatherState(ctx, settings);
+      const updated = await writeGist(credentials, { id, description: settings.gistDescription, content: manifestText(refreshed) }, { signal });
+      if (updated.ok) {
+        published = refreshed;
+        await fsp.writeFile(join(dir, MANIFEST_FILE), manifestText(refreshed), 'utf8');
+      }
+    }
+  }
+  return {
+    ...result,
+    gistId: id,
+    gistUrl: url,
+    pushed: true,
+    created: written.created === true,
+    summary: { bundles: published.bundles.length, plugins: published.plugins.length, configs: published.configs.length },
+  };
+}
+
+/** Apply the manifest a gist holds to this device. */
+async function doGistPull(ctx, settings, { overrideGistId, signal }) {
+  const credentials = await resolveCredentials(settings, { signal });
+  const gistId = parseGistId(overrideGistId ?? settings.gistId) ?? '';
+  if (gistId === '') {
+    throw new Error('dsh-sync: no gist is assigned yet — call dsh_sync action=configure target=gist gistId=<id or URL>, or pass gistId for this call only');
+  }
+  if (credentials.token === undefined) {
+    throw new Error(`dsh-sync: the gist API needs a GitHub token — ${credentialHint(settings, credentials) ?? 'no credential is configured'}`);
+  }
+  const read = await readGist(credentials, gistId, { signal });
+  if (!read.ok) throw new Error(`dsh-sync: cannot read the gist ${gistId}: ${read.error}`);
+  if (read.content === undefined) {
+    throw new Error(`dsh-sync: the gist ${gistId} carries no ${MANIFEST_FILE}; was it published by dsh-sync?`);
+  }
+  const manifest = parseManifest(read.content);
+  if (manifest === undefined) {
+    throw new Error(`dsh-sync: the gist ${gistId} carries no manifest this device understands (manifest version ${MANIFEST_VERSION})`);
+  }
+  const dir = gistCacheDirectory(ctx);
+  await fsp.mkdir(dir, { recursive: true });
+  await fsp.writeFile(join(dir, MANIFEST_FILE), read.content, 'utf8');
+  const applied = await applyManifest(ctx, manifest);
+  return {
+    target: 'gist',
+    gistId,
+    gistUrl: read.gist?.html_url,
+    manifest: { createdAt: manifest.createdAt, device: manifest.device, profile: manifest.profile },
+    ...applied,
+  };
+}
+
+/** The state, for whichever target is in effect. */
+async function doStatus(ctx, settings, { probeRemote, overrideUrl, overrideTarget, overrideGistId, signal }) {
+  const target = resolveTarget(settings, overrideTarget);
+  if (target === 'gist') return doGistStatus(ctx, settings, { probeRemote, overrideGistId, signal });
+  return doRepoStatus(ctx, settings, { probeRemote, overrideUrl, signal });
+}
+
+/** A snapshot, for whichever target is in effect. */
+async function doSnapshot(ctx, settings, { push, overrideUrl, overrideTarget, overrideGistId, signal }) {
+  const target = resolveTarget(settings, overrideTarget);
+  if (target === 'gist') return doGistSnapshot(ctx, settings, { push, overrideGistId, signal });
+  return doRepoSnapshot(ctx, settings, { push, overrideUrl, signal });
+}
+
+/** A pull, for whichever target is in effect. */
+async function doPull(ctx, settings, { overrideUrl, overrideTarget, overrideGistId, signal }) {
+  const target = resolveTarget(settings, overrideTarget);
+  if (target === 'gist') return doGistPull(ctx, settings, { overrideGistId, signal });
+  return doRepoPull(ctx, settings, { overrideUrl, signal });
+}
+
+async function doDiff(ctx, settings, { target, signal }) {
+  const dir = target === 'gist' ? gistCacheDirectory(ctx) : checkoutDirectory(ctx);
+  const committed = await readManifest(dir).catch(() => undefined);
   if (committed === undefined) {
-    return { compared: false, reason: `no committed ${MANIFEST_FILE} yet — run snapshot or pull first` };
+    return { target: target === 'gist' ? 'gist' : 'repo', compared: false, reason: `no committed ${MANIFEST_FILE} yet — run snapshot or pull first` };
   }
   const current = await gatherState(ctx, settings);
   const diff = diffManifests(current, committed);
   return {
+    target: target === 'gist' ? 'gist' : 'repo',
     compared: true,
     committedAt: committed.createdAt,
     committedBy: committed.device,
@@ -994,8 +1412,40 @@ async function doDiff(ctx, settings, { overrideUrl, signal }) {
   };
 }
 
+/**
+ * Write one value into this plugin's own configuration row.
+ *
+ * The gist id lives there, so a device that creates the gist hands the id to
+ * the other devices through the manifest it publishes.
+ */
+async function persistSetting(ctx, key, value) {
+  const entry = ctx.configEditor.entries().find((candidate) => candidate.options.id === SYNC_ENTRY_ID);
+  if (entry === undefined) return false;
+  await ctx.configEditor.edit(entry, (current) => ({ ...current, [key]: value }));
+  return true;
+}
+
 async function doConfigure(ctx, args) {
   const patch = {};
+  if (args.target !== undefined) {
+    const target = String(args.target).trim().toLowerCase();
+    if (target !== 'gist' && target !== 'repo') {
+      throw new Error(`dsh-sync: target must be "gist" (the default) or "repo", not: ${args.target}`);
+    }
+    patch.target = target;
+  }
+  if (args.gistId !== undefined) {
+    const raw = String(args.gistId).trim();
+    if (raw === '') {
+      patch.gistId = '';
+    } else {
+      const id = parseGistId(raw);
+      if (id === undefined) {
+        throw new Error(`dsh-sync: gistId must be a gist id, a https://gist.github.com/<user>/<id> URL, or a https://api.github.com/gists/<id> URL — but got: ${raw}`);
+      }
+      patch.gistId = id;
+    }
+  }
   if (args.repoUrl !== undefined) {
     parseGithubRemote(args.repoUrl); // throws on anything that is not a GitHub repository
     patch.repoUrl = String(args.repoUrl).trim();
@@ -1020,11 +1470,11 @@ async function doConfigure(ctx, args) {
     patch.githubTokenEnv = name;
   }
   if (Object.keys(patch).length === 0) {
-    throw new Error('dsh-sync: configure needs at least one of repoUrl, branch, authMode, githubTokenEnv');
+    throw new Error('dsh-sync: configure needs at least one of target, gistId, repoUrl, branch, authMode, githubTokenEnv');
   }
   const entry = ctx.configEditor.entries().find((candidate) => candidate.options.id === SYNC_ENTRY_ID);
   if (entry === undefined) {
-    throw new Error('dsh-sync: its own configuration entry is not addressable in this profile; set repoUrl in the profile patch instead');
+    throw new Error('dsh-sync: its own configuration entry is not addressable in this profile; set target and gistId in the profile patch instead');
   }
   await ctx.configEditor.edit(entry, (current) => ({ ...current, ...patch }));
   return { saved: patch, note: 'live profiles apply the change immediately; otherwise restart DSH' };
@@ -1153,19 +1603,23 @@ function currentSettings(ctx, base) {
  */
 async function runWebAction(ctx, settings, action, body) {
   const overrideUrl = body.repoUrl === undefined ? undefined : String(body.repoUrl);
+  const overrideTarget = body.target === undefined ? undefined : String(body.target);
+  const overrideGistId = body.gistId === undefined ? undefined : String(body.gistId);
   switch (action) {
     case 'status':
-      return doStatus(ctx, settings, { probeRemote: body.probeRemote === true, overrideUrl });
+      return doStatus(ctx, settings, { probeRemote: body.probeRemote === true, overrideUrl, overrideTarget, overrideGistId });
     case 'diff':
-      return doDiff(ctx, settings, { overrideUrl });
+      return doDiff(ctx, settings, { target: resolveTarget(settings, overrideTarget) });
     case 'snapshot':
-      return doSnapshot(ctx, settings, { push: false, overrideUrl });
+      return doSnapshot(ctx, settings, { push: false, overrideUrl, overrideTarget, overrideGistId });
     case 'push':
-      return doSnapshot(ctx, settings, { push: true, overrideUrl });
+      return doSnapshot(ctx, settings, { push: true, overrideUrl, overrideTarget, overrideGistId });
     case 'pull':
-      return doPull(ctx, settings, { overrideUrl });
+      return doPull(ctx, settings, { overrideUrl, overrideTarget, overrideGistId });
     case 'configure':
       return doConfigure(ctx, {
+        ...(body.target === undefined ? {} : { target: body.target }),
+        ...(body.gistId === undefined ? {} : { gistId: body.gistId }),
         ...(body.repoUrl === undefined ? {} : { repoUrl: body.repoUrl }),
         ...(body.branch === undefined ? {} : { branch: body.branch }),
         ...(body.authMode === undefined ? {} : { authMode: body.authMode }),
@@ -1211,8 +1665,11 @@ function resolveSettings(config) {
   const secretWords = new Set(String(config.redactKeySegments ?? '').split(',').map((word) => word.trim().toLowerCase()).filter((word) => word !== ''));
   const benignWords = new Set(String(config.redactBenignQualifiers ?? '').split(',').map((word) => word.trim().toLowerCase()).filter((word) => word !== ''));
   return {
+    target: config.target === 'repo' ? 'repo' : 'gist',
     repoUrl: String(config.repoUrl ?? '').trim(),
     branch: validBranch(String(config.branch ?? '')) ? String(config.branch) : 'main',
+    gistId: parseGistId(config.gistId) ?? '',
+    gistDescription: String(config.gistDescription ?? '').trim() || 'DSH Sync',
     authMode: config.authMode === 'pat' ? 'pat' : 'gh',
     githubTokenEnv: String(config.githubTokenEnv ?? '').trim(),
     commitName: String(config.commitName ?? '').trim() || 'DSH Sync',
@@ -1230,27 +1687,35 @@ export function apply(ctx, config) {
 
   const dispose = ctx.tools.register({
     name: 'dsh_sync',
-    description: 'Sync DeepSeek Harness plugins and settings across devices through a GitHub repository assigned in the plugin settings. status and diff are read-only local checks. configure assigns the repository (GitHub URL, branch, authentication mode, optional token environment variable) and persists it in this profile. Authentication defaults to the GitHub CLI (gh): the credential of the account gh is logged in as is used for HTTPS remotes; authMode=pat switches to a personal access token held in the environment variable named by githubTokenEnv. snapshot regenerates the sync manifest from this device and commits it to the local git checkout; push publishes that commit to GitHub; pull applies the remote manifest here — installing missing bundles, aligning enable states, and writing plugin configs through the same services as the settings UI, so some changes need a DSH restart. Config values whose key looks like a secret (token, password, …) are never exported. snapshot/push/pull/configure change the profile or files under ~/.dsh-sync and require danger-full-access or user approval.',
+    description: 'Sync DeepSeek Harness plugins and settings across devices through a GitHub Gist (the default) or a GitHub repository you own. status and diff are read-only local checks. configure assigns where the snapshot lives and persists it in this profile. snapshot regenerates the sync manifest from this device; push publishes it to the gist or the repository; pull applies the remote manifest here — installing missing bundles, aligning enable states, and writing plugin configs through the same services as the settings UI, so some changes need a DSH restart. Config values whose key looks like a secret (token, password, …) are never exported. snapshot/push/pull/configure change the profile or files under ~/.dsh-sync and require danger-full-access or user approval.',
     parameters: {
       action: {
         type: 'string', required: true,
         enum: ['status', 'configure', 'snapshot', 'push', 'pull', 'diff'],
-        description: 'Sync operation: status (local state and drift), configure (assign repository/branch/token variable), snapshot (commit state locally), push (commit and push to GitHub), pull (apply remote state here), diff (live state vs committed snapshot).',
+        description: 'Sync operation: status (local state and drift), configure (assign the target and where the snapshot lives), snapshot (record the state locally), push (publish it), pull (apply the remote state here), diff (live state vs the stored snapshot).',
+      },
+      target: {
+        type: 'string', enum: ['gist', 'repo'],
+        description: 'Where the snapshot lives: "gist" (the default) or "repo". configure persists it; the other actions accept it as a one-call override.',
+      },
+      gistId: {
+        type: 'string',
+        description: 'The GitHub Gist that holds the snapshot: a gist id, a https://gist.github.com/<user>/<id> URL, or a https://api.github.com/gists/<id> URL. configure persists it; the other actions accept it as a one-call override. Leave it empty and the first push creates a secret gist and remembers its id.',
       },
       repoUrl: {
         type: 'string',
-        description: 'GitHub repository (https://github.com/<owner>/<repo> and other GitHub forms). configure persists it; snapshot/push/pull/status accept it as a one-call override.',
+        description: 'GitHub repository that holds the snapshot, used when the target is "repo" (https://github.com/<owner>/<repo> and other GitHub forms). configure persists it; the other actions accept it as a one-call override.',
       },
-      branch: { type: 'string', description: 'configure only: branch to sync; defaults to main.' },
+      branch: { type: 'string', description: 'configure only: branch to sync on the repository, used when the target is "repo"; defaults to main.' },
       authMode: {
         type: 'string', enum: ['gh', 'pat'],
-        description: 'configure only: how the GitHub repository is authenticated — "gh" (the default) uses the credential of the account the GitHub CLI is logged in as; "pat" uses the personal access token found in the environment variable named by githubTokenEnv. An SSH remote is authenticated by your SSH key in either mode.',
+        description: 'How GitHub is authenticated; both targets use the same credential. "gh" (the default) uses the credential of the account the GitHub CLI is logged in as; "pat" uses the personal access token held in the environment variable named by githubTokenEnv. An SSH remote is authenticated by your SSH key in either mode. configure persists it.',
       },
       githubTokenEnv: {
         type: 'string',
-        description: 'configure only: name of an environment variable holding a GitHub personal access token for private repositories over HTTPS, used when authMode is "pat"; git credential helpers or SSH remotes are used when unset.',
+        description: 'configure only: name of an environment variable holding a GitHub personal access token, used when authMode is "pat"; git credential helpers or SSH remotes are used when unset.',
       },
-      probeRemote: { type: 'boolean', description: 'status only: also contact GitHub to check the repository is reachable and has the branch.' },
+      probeRemote: { type: 'boolean', description: 'status only: also contact GitHub to check whether the gist or the repository is reachable and usable.' },
     },
     timeoutMs: 600000,
     output: {
@@ -1269,27 +1734,31 @@ export function apply(ctx, config) {
       // The repository assignment lives in this plugin's own configuration
       // row, so every call reads the effective settings as they are now.
       const settings = currentSettings(ctx, base);
+      // The target and the place it points at live in this plugin's own
+      // configuration row, so every call reads the effective settings as they
+      // are now; a parameter overrides them for that one call.
+      const overrides = { overrideUrl: args.repoUrl, overrideTarget: args.target, overrideGistId: args.gistId };
       switch (args.action) {
         case 'status':
-          return JSON.stringify(await doStatus(ctx, settings, { probeRemote: args.probeRemote === true, overrideUrl: args.repoUrl, signal }), null, 2);
+          return JSON.stringify(await doStatus(ctx, settings, { probeRemote: args.probeRemote === true, ...overrides, signal }), null, 2);
         case 'diff':
-          return JSON.stringify(await doDiff(ctx, settings, { overrideUrl: args.repoUrl, signal }), null, 2);
+          return JSON.stringify(await doDiff(ctx, settings, { target: resolveTarget(settings, args.target), signal }), null, 2);
         case 'configure':
-          await requireFullAccess(ctx, exec, 'configure', 'assign the GitHub repository used to sync this profile');
+          await requireFullAccess(ctx, exec, 'configure', 'assign where this profile syncs to');
           exec.signal.throwIfAborted();
           return JSON.stringify(await doConfigure(ctx, args), null, 2);
         case 'snapshot':
-          await requireFullAccess(ctx, exec, 'snapshot', 'write the sync manifest into the local git checkout');
+          await requireFullAccess(ctx, exec, 'snapshot', 'write the sync manifest into the local cache');
           exec.signal.throwIfAborted();
-          return JSON.stringify(await doSnapshot(ctx, settings, { push: false, overrideUrl: args.repoUrl, signal }), null, 2);
+          return JSON.stringify(await doSnapshot(ctx, settings, { push: false, ...overrides, signal }), null, 2);
         case 'push':
-          await requireFullAccess(ctx, exec, 'push', 'publish this profile\'s plugins and settings to the GitHub sync repository');
+          await requireFullAccess(ctx, exec, 'push', 'publish this profile\'s plugins and settings to GitHub');
           exec.signal.throwIfAborted();
-          return JSON.stringify(await doSnapshot(ctx, settings, { push: true, overrideUrl: args.repoUrl, signal }), null, 2);
+          return JSON.stringify(await doSnapshot(ctx, settings, { push: true, ...overrides, signal }), null, 2);
         case 'pull':
           await requireFullAccess(ctx, exec, 'pull', 'apply the remote sync manifest to this profile');
           exec.signal.throwIfAborted();
-          return JSON.stringify(await doPull(ctx, settings, { overrideUrl: args.repoUrl, signal }), null, 2);
+          return JSON.stringify(await doPull(ctx, settings, { ...overrides, signal }), null, 2);
         default:
           throw new Error(`dsh-sync: unknown action ${String(args.action)}`);
       }
