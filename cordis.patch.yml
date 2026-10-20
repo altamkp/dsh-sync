@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-sync
+      name: '@altamkp/dsh-sync'
+      config: {}

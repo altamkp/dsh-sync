@@ -1,0 +1,9 @@
+node_modules/
+
+# Local diagnostics written while developing this plugin
+plugin-debug.log
+selftest.json
+
+# Yarn/pnpm leftovers from local installs
+.pnpm-store/
+*.log
